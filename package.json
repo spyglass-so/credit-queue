@@ -1,0 +1,52 @@
+{
+  "name": "redledger",
+  "version": "0.1.0",
+  "description": "Atomic Redis Lua credit ledger with two-phase reservations (reserve, settle, release), monotonic period versioning, and write-behind event queue.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spyglass-so/redledger.git"
+  },
+  "homepage": "https://github.com/spyglass-so/redledger#readme",
+  "bugs": {
+    "url": "https://github.com/spyglass-so/redledger/issues"
+  },
+  "keywords": [
+    "redis",
+    "upstash",
+    "billing",
+    "credits",
+    "ledger",
+    "metering",
+    "rate-limit",
+    "lua"
+  ],
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm run typecheck && pnpm run test && pnpm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
+}
