@@ -87,11 +87,10 @@ class FakeRedis {
     const stateKey = keys[0]!;
     const billingPeriodId = String(argv[0]);
     const billingTeamId = String(argv[1]);
-    const allowance = Number(argv[2] ?? 0);
-    const granted = Number(argv[3] ?? 0);
-    const consumed = Number(argv[4] ?? 0);
-    const checkpointVersion = Number(argv[5] ?? 0);
-    const ttlSeconds = Number(argv[6] ?? 3024000);
+    const budget = Number(argv[2] ?? 0);
+    const consumed = Number(argv[3] ?? 0);
+    const checkpointVersion = Number(argv[4] ?? 0);
+    const ttlSeconds = Number(argv[5] ?? 3024000);
 
     if (this.exists(stateKey) === 0) {
       this.hset(
@@ -100,10 +99,8 @@ class FakeRedis {
         billingPeriodId,
         'billingTeamId',
         billingTeamId,
-        'allowanceMicrodollars',
-        allowance,
-        'grantedMicrodollars',
-        granted,
+        'budgetMicrodollars',
+        budget,
         'consumedMicrodollars',
         consumed,
         'reservedMicrodollars',
@@ -120,10 +117,8 @@ class FakeRedis {
         billingPeriodId,
         'billingTeamId',
         billingTeamId,
-        'allowanceMicrodollars',
-        allowance,
-        'grantedMicrodollars',
-        granted,
+        'budgetMicrodollars',
+        budget,
       );
       if (checkpointVersion > currentVersion) {
         this.hset(
@@ -139,11 +134,8 @@ class FakeRedis {
       }
     }
 
-    const finalAllowance = Number(
-      this.hget(stateKey, 'allowanceMicrodollars') ?? 0,
-    );
-    const finalGranted = Number(
-      this.hget(stateKey, 'grantedMicrodollars') ?? 0,
+    const finalBudget = Number(
+      this.hget(stateKey, 'budgetMicrodollars') ?? 0,
     );
     const finalConsumed = Number(
       this.hget(stateKey, 'consumedMicrodollars') ?? 0,
@@ -157,12 +149,10 @@ class FakeRedis {
     return JSON.stringify({
       billingPeriodId,
       billingTeamId: finalTeamId,
-      allowanceMicrodollars: finalAllowance,
-      grantedMicrodollars: finalGranted,
+      budgetMicrodollars: finalBudget,
       consumedMicrodollars: finalConsumed,
       reservedMicrodollars: finalReserved,
-      availableMicrodollars:
-        finalAllowance + finalGranted - (finalConsumed + finalReserved),
+      availableMicrodollars: finalBudget - (finalConsumed + finalReserved),
       version: finalVersion,
     });
   }
@@ -208,8 +198,7 @@ class FakeRedis {
       });
     }
 
-    const allowance = Number(this.hget(stateKey, 'allowanceMicrodollars') ?? 0);
-    const granted = Number(this.hget(stateKey, 'grantedMicrodollars') ?? 0);
+    const budget = Number(this.hget(stateKey, 'budgetMicrodollars') ?? 0);
     let consumed = Number(this.hget(stateKey, 'consumedMicrodollars') ?? 0);
     let reserved = Number(this.hget(stateKey, 'reservedMicrodollars') ?? 0);
     let version = Number(this.hget(stateKey, 'version') ?? 0);
@@ -221,11 +210,10 @@ class FakeRedis {
     const buildState = () => ({
       billingPeriodId,
       billingTeamId,
-      allowanceMicrodollars: allowance,
-      grantedMicrodollars: granted,
+      budgetMicrodollars: budget,
       consumedMicrodollars: consumed,
       reservedMicrodollars: reserved,
-      availableMicrodollars: allowance + granted - (consumed + reserved),
+      availableMicrodollars: budget - (consumed + reserved),
       version,
     });
 
@@ -244,7 +232,7 @@ class FakeRedis {
         });
       }
 
-      const available = allowance + granted - (consumed + reserved);
+      const available = budget - (consumed + reserved);
       if (!allowOverdraft && available < amount) {
         return JSON.stringify({
           ok: false,
@@ -333,8 +321,7 @@ class FakeRedis {
       amount: eventAmount,
       reservedAmount,
       version,
-      allowanceMicrodollars: allowance,
-      grantedMicrodollars: granted,
+      budgetMicrodollars: budget,
       consumedMicrodollars: consumed,
       reservedMicrodollars: reserved,
       availableMicrodollars: nextState.availableMicrodollars,
@@ -378,8 +365,7 @@ describe('RedLedger', () => {
     const seeded = await ledger.seedPeriod({
       billingPeriodId: PERIOD_ID,
       billingTeamId: BILLING_TEAM_ID,
-      allowanceMicrodollars: 5_000_000,
-      grantedMicrodollars: 500_000,
+      budgetMicrodollars: 5_500_000,
       consumedMicrodollars: 100_000,
       checkpointVersion: 4,
     });
@@ -387,8 +373,7 @@ describe('RedLedger', () => {
     expect(seeded).toEqual({
       billingPeriodId: PERIOD_ID,
       billingTeamId: BILLING_TEAM_ID,
-      allowanceMicrodollars: 5_000_000,
-      grantedMicrodollars: 500_000,
+      budgetMicrodollars: 5_500_000,
       consumedMicrodollars: 100_000,
       reservedMicrodollars: 0,
       availableMicrodollars: 5_400_000,
@@ -403,8 +388,7 @@ describe('RedLedger', () => {
     await ledger.seedPeriod({
       billingPeriodId: PERIOD_ID,
       billingTeamId: BILLING_TEAM_ID,
-      allowanceMicrodollars: 10_000,
-      grantedMicrodollars: 2_000,
+      budgetMicrodollars: 12_000,
       consumedMicrodollars: 0,
       checkpointVersion: 0,
     });
@@ -505,8 +489,7 @@ describe('RedLedger', () => {
     await ledger.seedPeriod({
       billingPeriodId: PERIOD_ID,
       billingTeamId: BILLING_TEAM_ID,
-      allowanceMicrodollars: 5_000,
-      grantedMicrodollars: 0,
+      budgetMicrodollars: 5_000,
       consumedMicrodollars: 4_000,
       checkpointVersion: 7,
     });
@@ -536,8 +519,7 @@ describe('RedLedger', () => {
     loadPeriodMock.mockResolvedValue({
       billingPeriodId: PERIOD_ID,
       billingTeamId: BILLING_TEAM_ID,
-      allowanceMicrodollars: 20_000_000,
-      grantedMicrodollars: 1_000_000,
+      budgetMicrodollars: 21_000_000,
       consumedMicrodollars: 5_000_000,
       checkpointVersion: 12,
     });
@@ -559,8 +541,7 @@ describe('RedLedger', () => {
     expect(result.state).toEqual({
       billingPeriodId: PERIOD_ID,
       billingTeamId: BILLING_TEAM_ID,
-      allowanceMicrodollars: 20_000_000,
-      grantedMicrodollars: 1_000_000,
+      budgetMicrodollars: 21_000_000,
       consumedMicrodollars: 5_050_000,
       reservedMicrodollars: 0,
       availableMicrodollars: 15_950_000,

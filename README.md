@@ -30,8 +30,7 @@ export const creditLedger = new RedLedger({
     return {
       billingPeriodId: row.id,
       billingTeamId: row.teamId,
-      allowanceMicrodollars: row.allowanceMicrodollars,
-      grantedMicrodollars: row.grantedMicrodollars,
+      budgetMicrodollars: row.allowanceMicrodollars + row.grantedMicrodollars,
       consumedMicrodollars: row.consumedMicrodollars,
       checkpointVersion: row.checkpointVersion,
     };
@@ -70,5 +69,5 @@ const events = await creditLedger.dequeue(100);
 
 ## Redis Keys
 
-- `{prefix}:period:{billingPeriodId}:state` (Hash) — Stores `allowanceMicrodollars`, `grantedMicrodollars`, `consumedMicrodollars`, `reservedMicrodollars`, `version`, and active holds (`res:{requestId}`).
+- `{prefix}:period:{billingPeriodId}:state` (Hash) — Stores `budgetMicrodollars`, `consumedMicrodollars`, `reservedMicrodollars`, `version`, and active holds (`res:{requestId}`).
 - `{prefix}:credit-events:queue` (List) — Write-behind queue where every mutation atomically `RPUSH`es a `CreditLedgerEvent`.

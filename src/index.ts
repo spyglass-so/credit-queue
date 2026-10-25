@@ -17,8 +17,7 @@ export type CreditLedgerEvent<
   amount: number;
   reservedAmount: number;
   version: number;
-  allowanceMicrodollars: number;
-  grantedMicrodollars: number;
+  budgetMicrodollars: number;
   consumedMicrodollars: number;
   reservedMicrodollars: number;
   availableMicrodollars: number;
@@ -29,8 +28,7 @@ export type CreditLedgerEvent<
 export type BillingPeriodBalanceState = {
   billingPeriodId: string;
   billingTeamId: string;
-  allowanceMicrodollars: number;
-  grantedMicrodollars: number;
+  budgetMicrodollars: number;
   consumedMicrodollars: number;
   reservedMicrodollars: number;
   availableMicrodollars: number;
@@ -74,8 +72,7 @@ export type CreditMutationInput<
 export type SeedBillingPeriodInput = {
   billingPeriodId: string;
   billingTeamId: string;
-  allowanceMicrodollars: number;
-  grantedMicrodollars: number;
+  budgetMicrodollars: number;
   consumedMicrodollars?: number;
   checkpointVersion?: number;
   ttlSeconds?: number;
@@ -113,11 +110,10 @@ export const SEED_BILLING_PERIOD_LUA = `
 local stateKey = KEYS[1]
 local billingPeriodId = ARGV[1]
 local billingTeamId = ARGV[2]
-local allowance = tonumber(ARGV[3]) or 0
-local granted = tonumber(ARGV[4]) or 0
-local consumed = tonumber(ARGV[5]) or 0
-local checkpointVersion = tonumber(ARGV[6]) or 0
-local ttlSeconds = tonumber(ARGV[7]) or 3024000
+local budget = tonumber(ARGV[3]) or 0
+local consumed = tonumber(ARGV[4]) or 0
+local checkpointVersion = tonumber(ARGV[5]) or 0
+local ttlSeconds = tonumber(ARGV[6]) or 3024000
 
 if redis.call('EXISTS', stateKey) == 0 then
   redis.call(
@@ -125,8 +121,7 @@ if redis.call('EXISTS', stateKey) == 0 then
     stateKey,
     'billingPeriodId', billingPeriodId,
     'billingTeamId', billingTeamId,
-    'allowanceMicrodollars', allowance,
-    'grantedMicrodollars', granted,
+    'budgetMicrodollars', budget,
     'consumedMicrodollars', consumed,
     'reservedMicrodollars', 0,
     'version', checkpointVersion
@@ -139,8 +134,7 @@ else
     stateKey,
     'billingPeriodId', billingPeriodId,
     'billingTeamId', billingTeamId,
-    'allowanceMicrodollars', allowance,
-    'grantedMicrodollars', granted
+    'budgetMicrodollars', budget
   )
   if checkpointVersion > currentVersion then
     redis.call(
@@ -155,8 +149,7 @@ else
   end
 end
 
-local finalAllowance = tonumber(redis.call('HGET', stateKey, 'allowanceMicrodollars') or '0')
-local finalGranted = tonumber(redis.call('HGET', stateKey, 'grantedMicrodollars') or '0')
+local finalBudget = tonumber(redis.call('HGET', stateKey, 'budgetMicrodollars') or '0')
 local finalConsumed = tonumber(redis.call('HGET', stateKey, 'consumedMicrodollars') or '0')
 local finalReserved = tonumber(redis.call('HGET', stateKey, 'reservedMicrodollars') or '0')
 local finalVersion = tonumber(redis.call('HGET', stateKey, 'version') or '0')
@@ -165,11 +158,10 @@ local finalTeamId = redis.call('HGET', stateKey, 'billingTeamId') or billingTeam
 return cjson.encode({
   billingPeriodId = billingPeriodId,
   billingTeamId = finalTeamId,
-  allowanceMicrodollars = finalAllowance,
-  grantedMicrodollars = finalGranted,
+  budgetMicrodollars = finalBudget,
   consumedMicrodollars = finalConsumed,
   reservedMicrodollars = finalReserved,
-  availableMicrodollars = (finalAllowance + finalGranted) - (finalConsumed + finalReserved),
+  availableMicrodollars = finalBudget - (finalConsumed + finalReserved),
   version = finalVersion
 })
 `;
@@ -212,8 +204,7 @@ if redis.call('EXISTS', stateKey) == 0 then
   })
 end
 
-local allowance = tonumber(redis.call('HGET', stateKey, 'allowanceMicrodollars') or '0')
-local granted = tonumber(redis.call('HGET', stateKey, 'grantedMicrodollars') or '0')
+local budget = tonumber(redis.call('HGET', stateKey, 'budgetMicrodollars') or '0')
 local consumed = tonumber(redis.call('HGET', stateKey, 'consumedMicrodollars') or '0')
 local reserved = tonumber(redis.call('HGET', stateKey, 'reservedMicrodollars') or '0')
 local version = tonumber(redis.call('HGET', stateKey, 'version') or '0')
@@ -226,11 +217,10 @@ local function buildState()
   return {
     billingPeriodId = billingPeriodId,
     billingTeamId = billingTeamId,
-    allowanceMicrodollars = allowance,
-    grantedMicrodollars = granted,
+    budgetMicrodollars = budget,
     consumedMicrodollars = consumed,
     reservedMicrodollars = reserved,
-    availableMicrodollars = (allowance + granted) - (consumed + reserved),
+    availableMicrodollars = budget - (consumed + reserved),
     version = version
   }
 end
@@ -250,7 +240,7 @@ if operation == 'reserve' then
     })
   end
 
-  local available = (allowance + granted) - (consumed + reserved)
+  local available = budget - (consumed + reserved)
   if not allowOverdraft and available < amount then
     return cjson.encode({
       ok = false,
@@ -342,8 +332,7 @@ local event = {
   amount = eventAmount,
   reservedAmount = reservedAmount,
   version = version,
-  allowanceMicrodollars = allowance,
-  grantedMicrodollars = granted,
+  budgetMicrodollars = budget,
   consumedMicrodollars = consumed,
   reservedMicrodollars = reserved,
   availableMicrodollars = nextState.availableMicrodollars,
@@ -391,7 +380,7 @@ export class RedLedger<
     params: SeedBillingPeriodInput,
   ): Promise<BillingPeriodBalanceState> {
     const raw = await this.redis.eval<
-      [string, string, number, number, number, number, number],
+      [string, string, number, number, number, number],
       string | BillingPeriodBalanceState
     >(
       SEED_BILLING_PERIOD_LUA,
@@ -399,8 +388,7 @@ export class RedLedger<
       [
         params.billingPeriodId,
         params.billingTeamId,
-        Math.trunc(params.allowanceMicrodollars),
-        Math.trunc(params.grantedMicrodollars),
+        Math.trunc(params.budgetMicrodollars),
         Math.trunc(params.consumedMicrodollars ?? 0),
         Math.trunc(params.checkpointVersion ?? 0),
         params.ttlSeconds ?? this.stateTtlSeconds,
@@ -422,8 +410,7 @@ export class RedLedger<
       return null;
     }
 
-    const allowanceMicrodollars = Number(raw.allowanceMicrodollars ?? 0);
-    const grantedMicrodollars = Number(raw.grantedMicrodollars ?? 0);
+    const budgetMicrodollars = Number(raw.budgetMicrodollars ?? 0);
     const consumedMicrodollars = Number(raw.consumedMicrodollars ?? 0);
     const reservedMicrodollars = Number(raw.reservedMicrodollars ?? 0);
     const version = Number(raw.version ?? 0);
@@ -431,14 +418,11 @@ export class RedLedger<
     return {
       billingPeriodId: String(raw.billingPeriodId ?? billingPeriodId),
       billingTeamId: String(raw.billingTeamId ?? ''),
-      allowanceMicrodollars,
-      grantedMicrodollars,
+      budgetMicrodollars,
       consumedMicrodollars,
       reservedMicrodollars,
       availableMicrodollars:
-        allowanceMicrodollars +
-        grantedMicrodollars -
-        (consumedMicrodollars + reservedMicrodollars),
+        budgetMicrodollars - (consumedMicrodollars + reservedMicrodollars),
       version,
     };
   }
