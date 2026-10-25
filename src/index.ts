@@ -1,6 +1,6 @@
 export type CreditOperation = 'reserve' | 'settle' | 'release';
 
-export type CreditLedgerEvent<
+export type CreditQueueEvent<
   TMetadata extends Record<string, unknown> = Record<string, unknown>,
 > = {
   key: string;
@@ -17,7 +17,7 @@ export type CreditLedgerEvent<
   metadata?: TMetadata;
 };
 
-export type LedgerBalanceState = {
+export type CreditBalanceState = {
   key: string;
   budget: number;
   consumed: number;
@@ -39,8 +39,8 @@ export type CreditMutationResult<
   ok: boolean;
   status: CreditMutationStatus;
   reason?: string;
-  state: LedgerBalanceState | null;
-  event: CreditLedgerEvent<TMetadata> | null;
+  state: CreditBalanceState | null;
+  event: CreditQueueEvent<TMetadata> | null;
 };
 
 export type CreditMutationInput<
@@ -62,7 +62,7 @@ export type SeedBalanceInput = {
   ttlSeconds?: number;
 };
 
-export interface RedLedgerRedisClient {
+export interface CreditQueueRedisClient {
   eval<TArgs extends unknown[], TData = unknown>(
     script: string,
     keys: string[],
@@ -74,10 +74,10 @@ export interface RedLedgerRedisClient {
   lpop<TData = unknown>(key: string, count?: number): Promise<TData | null>;
 }
 
-export type RedLedgerConfig<
+export type CreditQueueConfig<
   TMetadata extends Record<string, unknown> = Record<string, unknown>,
 > = {
-  redis: RedLedgerRedisClient;
+  redis: CreditQueueRedisClient;
   prefix?: string;
   queueKey?: string;
   stateTtlSeconds?: number;
@@ -85,7 +85,7 @@ export type RedLedgerConfig<
   __metadataType?: TMetadata;
 };
 
-const DEFAULT_PREFIX = 'redledger';
+const DEFAULT_PREFIX = 'credit-queue';
 const DEFAULT_STATE_TTL_SECONDS = 35 * 24 * 60 * 60;
 
 export const SEED_BALANCE_LUA = `
@@ -313,10 +313,10 @@ return cjson.encode({
 })
 `;
 
-export class RedLedger<
+export class CreditQueue<
   TMetadata extends Record<string, unknown> = Record<string, unknown>,
 > {
-  private readonly redis: RedLedgerRedisClient;
+  private readonly redis: CreditQueueRedisClient;
   private readonly prefix: string;
   public readonly queueKey: string;
   private readonly stateTtlSeconds: number;
@@ -324,7 +324,7 @@ export class RedLedger<
     key: string,
   ) => Promise<SeedBalanceInput | null>;
 
-  constructor(config: RedLedgerConfig<TMetadata>) {
+  constructor(config: CreditQueueConfig<TMetadata>) {
     this.redis = config.redis;
     this.prefix = config.prefix ?? DEFAULT_PREFIX;
     this.queueKey = config.queueKey ?? `${this.prefix}:events:queue`;
@@ -338,10 +338,10 @@ export class RedLedger<
 
   public async seedBalance(
     params: SeedBalanceInput,
-  ): Promise<LedgerBalanceState> {
+  ): Promise<CreditBalanceState> {
     const raw = await this.redis.eval<
       [string, number, number, number, number],
-      string | LedgerBalanceState
+      string | CreditBalanceState
     >(
       SEED_BALANCE_LUA,
       [this.stateKey(params.key)],
@@ -355,11 +355,11 @@ export class RedLedger<
     );
 
     return typeof raw === 'string'
-      ? (JSON.parse(raw) as LedgerBalanceState)
+      ? (JSON.parse(raw) as CreditBalanceState)
       : raw;
   }
 
-  public async getState(key: string): Promise<LedgerBalanceState | null> {
+  public async getState(key: string): Promise<CreditBalanceState | null> {
     const raw = await this.redis.hgetall<Record<string, string | number>>(
       this.stateKey(key),
     );
@@ -463,9 +463,9 @@ export class RedLedger<
 
   public async dequeue(
     count = 100,
-  ): Promise<Array<CreditLedgerEvent<TMetadata>>> {
+  ): Promise<Array<CreditQueueEvent<TMetadata>>> {
     const raw = await this.redis.lpop<
-      Array<string | CreditLedgerEvent<TMetadata>>
+      Array<string | CreditQueueEvent<TMetadata>>
     >(this.queueKey, Math.max(1, Math.trunc(count)));
     if (!raw) {
       return [];
@@ -473,7 +473,7 @@ export class RedLedger<
     const items = Array.isArray(raw) ? raw : [raw];
     return items.map((item) =>
       typeof item === 'string'
-        ? (JSON.parse(item) as CreditLedgerEvent<TMetadata>)
+        ? (JSON.parse(item) as CreditQueueEvent<TMetadata>)
         : item,
     );
   }

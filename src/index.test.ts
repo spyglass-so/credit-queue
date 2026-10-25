@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  type CreditLedgerEvent,
+  CreditQueue,
+  type CreditQueueEvent,
   MUTATE_CREDITS_AND_ENQUEUE_LUA,
-  RedLedger,
   SEED_BALANCE_LUA,
 } from './index';
 
@@ -266,7 +266,7 @@ class FakeRedis {
     }
 
     const nextState = buildState();
-    const event: CreditLedgerEvent = {
+    const event: CreditQueueEvent = {
       key,
       requestId,
       operation,
@@ -296,20 +296,20 @@ const BUCKET_KEY = 'period-001';
 
 let fakeRedis: FakeRedis;
 let loadBalanceMock: ReturnType<typeof vi.fn>;
-let ledger: RedLedger;
+let queue: CreditQueue;
 
 beforeEach(() => {
   fakeRedis = new FakeRedis();
   loadBalanceMock = vi.fn().mockResolvedValue(null);
-  ledger = new RedLedger({
+  queue = new CreditQueue({
     redis: fakeRedis,
     loadBalance: loadBalanceMock,
   });
 });
 
-describe('RedLedger', () => {
+describe('CreditQueue', () => {
   it('seeds a balance and reads it back', async () => {
-    const seeded = await ledger.seedBalance({
+    const seeded = await queue.seedBalance({
       key: BUCKET_KEY,
       budget: 5_500_000,
       consumed: 100_000,
@@ -325,19 +325,19 @@ describe('RedLedger', () => {
       version: 4,
     });
 
-    const readBack = await ledger.getState(BUCKET_KEY);
+    const readBack = await queue.getState(BUCKET_KEY);
     expect(readBack).toEqual(seeded);
   });
 
   it('reserves, settles, and releases atomically while incrementing version and queuing events', async () => {
-    await ledger.seedBalance({
+    await queue.seedBalance({
       key: BUCKET_KEY,
       budget: 12_000,
       consumed: 0,
       version: 0,
     });
 
-    const reserve1 = await ledger.reserve({
+    const reserve1 = await queue.reserve({
       key: BUCKET_KEY,
       requestId: 'req-1',
       amount: 5_000,
@@ -364,7 +364,7 @@ describe('RedLedger', () => {
       toolName: 'searchBrands',
     });
 
-    const reserve2 = await ledger.reserve({
+    const reserve2 = await queue.reserve({
       key: BUCKET_KEY,
       requestId: 'req-2',
       amount: 4_000,
@@ -378,7 +378,7 @@ describe('RedLedger', () => {
       version: 2,
     });
 
-    const settle1 = await ledger.settle({
+    const settle1 = await queue.settle({
       key: BUCKET_KEY,
       requestId: 'req-1',
       amount: 3_000,
@@ -392,7 +392,7 @@ describe('RedLedger', () => {
       version: 3,
     });
 
-    const release2 = await ledger.release({
+    const release2 = await queue.release({
       key: BUCKET_KEY,
       requestId: 'req-2',
     });
@@ -405,26 +405,26 @@ describe('RedLedger', () => {
       version: 4,
     });
 
-    expect(fakeRedis.llen(ledger.queueKey)).toBe(4);
-    const events = await ledger.dequeue(10);
+    expect(fakeRedis.llen(queue.queueKey)).toBe(4);
+    const events = await queue.dequeue(10);
     expect(events.map((e) => [e.operation, e.version, e.amount])).toEqual([
       ['reserve', 1, 5_000],
       ['reserve', 2, 4_000],
       ['settle', 3, 3_000],
       ['release', 4, 4_000],
     ]);
-    expect(fakeRedis.llen(ledger.queueKey)).toBe(0);
+    expect(fakeRedis.llen(queue.queueKey)).toBe(0);
   });
 
   it('denies reserve when available balance is insufficient without changing version or queuing an event', async () => {
-    await ledger.seedBalance({
+    await queue.seedBalance({
       key: BUCKET_KEY,
       budget: 5_000,
       consumed: 4_000,
       version: 7,
     });
 
-    const denied = await ledger.reserve({
+    const denied = await queue.reserve({
       key: BUCKET_KEY,
       requestId: 'req-deny',
       amount: 2_000,
@@ -439,7 +439,7 @@ describe('RedLedger', () => {
       reserved: 0,
       version: 7,
     });
-    expect(fakeRedis.llen(ledger.queueKey)).toBe(0);
+    expect(fakeRedis.llen(queue.queueKey)).toBe(0);
   });
 
   it('auto-seeds via loadBalance callback on cold Redis cache miss', async () => {
@@ -450,7 +450,7 @@ describe('RedLedger', () => {
       version: 12,
     });
 
-    const result = await ledger.settle({
+    const result = await queue.settle({
       key: BUCKET_KEY,
       requestId: 'req-cold-1',
       amount: 50_000,
@@ -467,6 +467,6 @@ describe('RedLedger', () => {
       available: 15_950_000,
       version: 13,
     });
-    expect(fakeRedis.llen(ledger.queueKey)).toBe(1);
+    expect(fakeRedis.llen(queue.queueKey)).toBe(1);
   });
 });

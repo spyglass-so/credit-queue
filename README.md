@@ -1,27 +1,27 @@
-# redledger
+# credit-queue
 
-Atomic Redis Lua credit ledger with two-phase reservations (`reserve`, `settle`, `release`), monotonic versioning, and an atomic write-behind event queue.
+Atomic Redis Lua credit gate and write-behind event queue with two-phase reservations (`reserve`, `settle`, `release`) and monotonic versioning.
 
 Works with `@upstash/redis` or any Redis client providing `eval`, `hgetall`, and `lpop`.
 
 ## Install
 
 ```bash
-pnpm add redledger
+pnpm add credit-queue
 ```
 
 ## Quick Start
 
 ```ts
 import { Redis } from '@upstash/redis';
-import { RedLedger } from 'redledger';
+import { CreditQueue } from 'credit-queue';
 
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL!,
   token: process.env.UPSTASH_REDIS_REST_TOKEN!,
 });
 
-export const creditLedger = new RedLedger({
+export const creditQueue = new CreditQueue({
   redis,
   prefix: 'billing',
   loadBalance: async (key) => {
@@ -37,7 +37,7 @@ export const creditLedger = new RedLedger({
 });
 
 // 1. Reserve credits before running an operation
-const reserved = await creditLedger.reserve({
+const reserved = await creditQueue.reserve({
   key: 'period_1',
   requestId: 'req_123',
   amount: 5_000,
@@ -54,7 +54,7 @@ if (!reserved.ok) {
 }
 
 // 2. Settle actual usage (or release on failure)
-await creditLedger.settle({
+await creditQueue.settle({
   key: 'period_1',
   requestId: 'req_123',
   amount: 3_200,
@@ -67,10 +67,10 @@ await creditLedger.settle({
 });
 
 // 3. Drain events in background worker to checkpoint Postgres
-const events = await creditLedger.dequeue(100);
+const events = await creditQueue.dequeue(100);
 ```
 
 ## Redis Keys
 
 - `{prefix}:{key}:state` (Hash) — Stores `budget`, `consumed`, `reserved`, `version`, and active holds (`res:{requestId}`).
-- `{prefix}:events:queue` (List) — Write-behind queue where every mutation atomically `RPUSH`es a `CreditLedgerEvent`.
+- `{prefix}:events:queue` (List) — Write-behind queue where every mutation atomically `RPUSH`es a `CreditQueueEvent`.

@@ -1,22 +1,22 @@
 {
-  "name": "redledger",
+  "name": "credit-queue",
   "version": "0.1.0",
-  "description": "Atomic Redis Lua credit ledger with two-phase reservations (reserve, settle, release), monotonic period versioning, and write-behind event queue.",
+  "description": "Atomic Redis Lua credit gate and write-behind event queue with two-phase reservations (reserve, settle, release) and monotonic versioning.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/spyglass-so/redledger.git"
+    "url": "https://github.com/spyglass-so/credit-queue.git"
   },
-  "homepage": "https://github.com/spyglass-so/redledger#readme",
+  "homepage": "https://github.com/spyglass-so/credit-queue#readme",
   "bugs": {
-    "url": "https://github.com/spyglass-so/redledger/issues"
+    "url": "https://github.com/spyglass-so/credit-queue/issues"
   },
   "keywords": [
     "redis",
     "upstash",
     "billing",
     "credits",
-    "ledger",
+    "queue",
     "metering",
     "rate-limit",
     "lua"
