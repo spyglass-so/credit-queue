@@ -3,7 +3,7 @@ import {
   type CreditLedgerEvent,
   MUTATE_CREDITS_AND_ENQUEUE_LUA,
   RedLedger,
-  SEED_PERIOD_LUA,
+  SEED_BALANCE_LUA,
 } from './index';
 
 class FakeRedis {
@@ -74,7 +74,7 @@ class FakeRedis {
     args: TArgs,
   ): Promise<TData> {
     const argv = args as Array<string | number>;
-    if (script === SEED_PERIOD_LUA) {
+    if (script === SEED_BALANCE_LUA) {
       return this.runSeedScript(keys, argv) as unknown as TData;
     }
     if (script === MUTATE_CREDITS_AND_ENQUEUE_LUA) {
@@ -85,7 +85,7 @@ class FakeRedis {
 
   runSeedScript(keys: string[], argv: Array<string | number>): string {
     const stateKey = keys[0]!;
-    const periodId = String(argv[0]);
+    const key = String(argv[0]);
     const budget = Number(argv[1] ?? 0);
     const consumed = Number(argv[2] ?? 0);
     const version = Number(argv[3] ?? 0);
@@ -94,8 +94,8 @@ class FakeRedis {
     if (this.exists(stateKey) === 0) {
       this.hset(
         stateKey,
-        'periodId',
-        periodId,
+        'key',
+        key,
         'budget',
         budget,
         'consumed',
@@ -108,7 +108,7 @@ class FakeRedis {
       this.ttls.set(stateKey, ttlSeconds);
     } else {
       const currentVersion = Number(this.hget(stateKey, 'version') ?? 0);
-      this.hset(stateKey, 'periodId', periodId, 'budget', budget);
+      this.hset(stateKey, 'key', key, 'budget', budget);
       if (version > currentVersion) {
         this.hset(stateKey, 'consumed', consumed, 'version', version);
       }
@@ -123,7 +123,7 @@ class FakeRedis {
     const finalVersion = Number(this.hget(stateKey, 'version') ?? 0);
 
     return JSON.stringify({
-      periodId,
+      key,
       budget: finalBudget,
       consumed: finalConsumed,
       reserved: finalReserved,
@@ -137,13 +137,12 @@ class FakeRedis {
 
     const operation = String(argv[0]) as 'reserve' | 'settle' | 'release';
     const amount = Number(argv[1]);
-    const eventId = String(argv[2]);
-    const periodId = String(argv[3]);
-    const requestId = String(argv[4]);
-    const createdAt = String(argv[5]);
-    const stateTtlSeconds = Number(argv[6] ?? 3024000);
-    const allowOverdraft = String(argv[7]) === '1';
-    const metadataJson = String(argv[8] ?? '');
+    const key = String(argv[2]);
+    const requestId = String(argv[3]);
+    const createdAt = String(argv[4]);
+    const stateTtlSeconds = Number(argv[5] ?? 3024000);
+    const allowOverdraft = String(argv[6]) === '1';
+    const metadataJson = String(argv[7] ?? '');
 
     if (
       !Number.isFinite(amount) ||
@@ -174,7 +173,7 @@ class FakeRedis {
     let version = Number(this.hget(stateKey, 'version') ?? 0);
 
     const buildState = () => ({
-      periodId,
+      key,
       budget,
       consumed,
       reserved,
@@ -268,8 +267,7 @@ class FakeRedis {
 
     const nextState = buildState();
     const event: CreditLedgerEvent = {
-      eventId,
-      periodId,
+      key,
       requestId,
       operation,
       amount: eventAmount,
@@ -294,32 +292,32 @@ class FakeRedis {
   }
 }
 
-const PERIOD_ID = 'period-001';
+const BUCKET_KEY = 'period-001';
 
 let fakeRedis: FakeRedis;
-let loadPeriodMock: ReturnType<typeof vi.fn>;
+let loadBalanceMock: ReturnType<typeof vi.fn>;
 let ledger: RedLedger;
 
 beforeEach(() => {
   fakeRedis = new FakeRedis();
-  loadPeriodMock = vi.fn().mockResolvedValue(null);
+  loadBalanceMock = vi.fn().mockResolvedValue(null);
   ledger = new RedLedger({
     redis: fakeRedis,
-    loadPeriod: loadPeriodMock,
+    loadBalance: loadBalanceMock,
   });
 });
 
 describe('RedLedger', () => {
-  it('seeds a period balance and reads it back', async () => {
-    const seeded = await ledger.seedPeriod({
-      periodId: PERIOD_ID,
+  it('seeds a balance and reads it back', async () => {
+    const seeded = await ledger.seedBalance({
+      key: BUCKET_KEY,
       budget: 5_500_000,
       consumed: 100_000,
       version: 4,
     });
 
     expect(seeded).toEqual({
-      periodId: PERIOD_ID,
+      key: BUCKET_KEY,
       budget: 5_500_000,
       consumed: 100_000,
       reserved: 0,
@@ -327,24 +325,24 @@ describe('RedLedger', () => {
       version: 4,
     });
 
-    const readBack = await ledger.getState(PERIOD_ID);
+    const readBack = await ledger.getState(BUCKET_KEY);
     expect(readBack).toEqual(seeded);
   });
 
   it('reserves, settles, and releases atomically while incrementing version and queuing events', async () => {
-    await ledger.seedPeriod({
-      periodId: PERIOD_ID,
+    await ledger.seedBalance({
+      key: BUCKET_KEY,
       budget: 12_000,
       consumed: 0,
       version: 0,
     });
 
     const reserve1 = await ledger.reserve({
-      eventId: 'evt-1',
-      periodId: PERIOD_ID,
+      key: BUCKET_KEY,
       requestId: 'req-1',
       amount: 5_000,
       metadata: {
+        billingTeamId: 'team-1',
         workspaceId: 'ws-1',
         userId: 'user-1',
         toolName: 'searchBrands',
@@ -360,14 +358,14 @@ describe('RedLedger', () => {
       version: 1,
     });
     expect(reserve1.event?.metadata).toEqual({
+      billingTeamId: 'team-1',
       workspaceId: 'ws-1',
       userId: 'user-1',
       toolName: 'searchBrands',
     });
 
     const reserve2 = await ledger.reserve({
-      eventId: 'evt-2',
-      periodId: PERIOD_ID,
+      key: BUCKET_KEY,
       requestId: 'req-2',
       amount: 4_000,
     });
@@ -381,8 +379,7 @@ describe('RedLedger', () => {
     });
 
     const settle1 = await ledger.settle({
-      eventId: 'evt-3',
-      periodId: PERIOD_ID,
+      key: BUCKET_KEY,
       requestId: 'req-1',
       amount: 3_000,
     });
@@ -396,8 +393,7 @@ describe('RedLedger', () => {
     });
 
     const release2 = await ledger.release({
-      eventId: 'evt-4',
-      periodId: PERIOD_ID,
+      key: BUCKET_KEY,
       requestId: 'req-2',
     });
 
@@ -421,16 +417,15 @@ describe('RedLedger', () => {
   });
 
   it('denies reserve when available balance is insufficient without changing version or queuing an event', async () => {
-    await ledger.seedPeriod({
-      periodId: PERIOD_ID,
+    await ledger.seedBalance({
+      key: BUCKET_KEY,
       budget: 5_000,
       consumed: 4_000,
       version: 7,
     });
 
     const denied = await ledger.reserve({
-      eventId: 'evt-deny',
-      periodId: PERIOD_ID,
+      key: BUCKET_KEY,
       requestId: 'req-deny',
       amount: 2_000,
     });
@@ -447,26 +442,25 @@ describe('RedLedger', () => {
     expect(fakeRedis.llen(ledger.queueKey)).toBe(0);
   });
 
-  it('auto-seeds via loadPeriod callback on cold Redis cache miss', async () => {
-    loadPeriodMock.mockResolvedValue({
-      periodId: PERIOD_ID,
+  it('auto-seeds via loadBalance callback on cold Redis cache miss', async () => {
+    loadBalanceMock.mockResolvedValue({
+      key: BUCKET_KEY,
       budget: 21_000_000,
       consumed: 5_000_000,
       version: 12,
     });
 
     const result = await ledger.settle({
-      eventId: 'evt-cold-1',
-      periodId: PERIOD_ID,
+      key: BUCKET_KEY,
       requestId: 'req-cold-1',
       amount: 50_000,
     });
 
-    expect(loadPeriodMock).toHaveBeenCalledWith(PERIOD_ID);
+    expect(loadBalanceMock).toHaveBeenCalledWith(BUCKET_KEY);
     expect(result.ok).toBe(true);
     expect(result.status).toBe('applied');
     expect(result.state).toEqual({
-      periodId: PERIOD_ID,
+      key: BUCKET_KEY,
       budget: 21_000_000,
       consumed: 5_050_000,
       reserved: 0,

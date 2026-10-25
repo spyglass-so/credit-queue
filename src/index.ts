@@ -1,12 +1,9 @@
-import { randomUUID } from 'node:crypto';
-
 export type CreditOperation = 'reserve' | 'settle' | 'release';
 
 export type CreditLedgerEvent<
   TMetadata extends Record<string, unknown> = Record<string, unknown>,
 > = {
-  eventId: string;
-  periodId: string;
+  key: string;
   requestId: string;
   operation: CreditOperation;
   amount: number;
@@ -20,8 +17,8 @@ export type CreditLedgerEvent<
   metadata?: TMetadata;
 };
 
-export type PeriodBalanceState = {
-  periodId: string;
+export type LedgerBalanceState = {
+  key: string;
   budget: number;
   consumed: number;
   reserved: number;
@@ -42,15 +39,14 @@ export type CreditMutationResult<
   ok: boolean;
   status: CreditMutationStatus;
   reason?: string;
-  state: PeriodBalanceState | null;
+  state: LedgerBalanceState | null;
   event: CreditLedgerEvent<TMetadata> | null;
 };
 
 export type CreditMutationInput<
   TMetadata extends Record<string, unknown> = Record<string, unknown>,
 > = {
-  eventId?: string;
-  periodId: string;
+  key: string;
   requestId: string;
   amount: number;
   allowOverdraft?: boolean;
@@ -58,8 +54,8 @@ export type CreditMutationInput<
   metadata?: TMetadata;
 };
 
-export type SeedPeriodInput = {
-  periodId: string;
+export type SeedBalanceInput = {
+  key: string;
   budget: number;
   consumed?: number;
   version?: number;
@@ -85,16 +81,16 @@ export type RedLedgerConfig<
   prefix?: string;
   queueKey?: string;
   stateTtlSeconds?: number;
-  loadPeriod?: (periodId: string) => Promise<SeedPeriodInput | null>;
+  loadBalance?: (key: string) => Promise<SeedBalanceInput | null>;
   __metadataType?: TMetadata;
 };
 
-const DEFAULT_PREFIX = 'billing';
+const DEFAULT_PREFIX = 'redledger';
 const DEFAULT_STATE_TTL_SECONDS = 35 * 24 * 60 * 60;
 
-export const SEED_PERIOD_LUA = `
+export const SEED_BALANCE_LUA = `
 local stateKey = KEYS[1]
-local periodId = ARGV[1]
+local key = ARGV[1]
 local budget = tonumber(ARGV[2]) or 0
 local consumed = tonumber(ARGV[3]) or 0
 local version = tonumber(ARGV[4]) or 0
@@ -104,7 +100,7 @@ if redis.call('EXISTS', stateKey) == 0 then
   redis.call(
     'HSET',
     stateKey,
-    'periodId', periodId,
+    'key', key,
     'budget', budget,
     'consumed', consumed,
     'reserved', 0,
@@ -116,7 +112,7 @@ else
   redis.call(
     'HSET',
     stateKey,
-    'periodId', periodId,
+    'key', key,
     'budget', budget
   )
   if version > currentVersion then
@@ -138,7 +134,7 @@ local finalReserved = tonumber(redis.call('HGET', stateKey, 'reserved') or '0')
 local finalVersion = tonumber(redis.call('HGET', stateKey, 'version') or '0')
 
 return cjson.encode({
-  periodId = periodId,
+  key = key,
   budget = finalBudget,
   consumed = finalConsumed,
   reserved = finalReserved,
@@ -153,13 +149,12 @@ local queueKey = KEYS[2]
 
 local operation = ARGV[1]
 local amount = tonumber(ARGV[2])
-local eventId = ARGV[3]
-local periodId = ARGV[4]
-local requestId = ARGV[5]
-local createdAt = ARGV[6]
-local stateTtlSeconds = tonumber(ARGV[7]) or 3024000
-local allowOverdraft = ARGV[8] == '1'
-local metadataJson = ARGV[9]
+local key = ARGV[3]
+local requestId = ARGV[4]
+local createdAt = ARGV[5]
+local stateTtlSeconds = tonumber(ARGV[6]) or 3024000
+local allowOverdraft = ARGV[7] == '1'
+local metadataJson = ARGV[8]
 
 if not amount or amount < 0 or math.floor(amount) ~= amount then
   return cjson.encode({
@@ -187,7 +182,7 @@ local version = tonumber(redis.call('HGET', stateKey, 'version') or '0')
 
 local function buildState()
   return {
-    periodId = periodId,
+    key = key,
     budget = budget,
     consumed = consumed,
     reserved = reserved,
@@ -291,8 +286,7 @@ end
 
 local nextState = buildState()
 local event = {
-  eventId = eventId,
-  periodId = periodId,
+  key = key,
   requestId = requestId,
   operation = operation,
   amount = eventAmount,
@@ -326,31 +320,33 @@ export class RedLedger<
   private readonly prefix: string;
   public readonly queueKey: string;
   private readonly stateTtlSeconds: number;
-  private readonly loadPeriod?: (
-    periodId: string,
-  ) => Promise<SeedPeriodInput | null>;
+  private readonly loadBalance?: (
+    key: string,
+  ) => Promise<SeedBalanceInput | null>;
 
   constructor(config: RedLedgerConfig<TMetadata>) {
     this.redis = config.redis;
     this.prefix = config.prefix ?? DEFAULT_PREFIX;
-    this.queueKey = config.queueKey ?? `${this.prefix}:credit-events:queue`;
+    this.queueKey = config.queueKey ?? `${this.prefix}:events:queue`;
     this.stateTtlSeconds = config.stateTtlSeconds ?? DEFAULT_STATE_TTL_SECONDS;
-    this.loadPeriod = config.loadPeriod;
+    this.loadBalance = config.loadBalance;
   }
 
-  public stateKey(periodId: string): string {
-    return `${this.prefix}:period:${periodId}:state`;
+  public stateKey(key: string): string {
+    return `${this.prefix}:${key}:state`;
   }
 
-  public async seedPeriod(params: SeedPeriodInput): Promise<PeriodBalanceState> {
+  public async seedBalance(
+    params: SeedBalanceInput,
+  ): Promise<LedgerBalanceState> {
     const raw = await this.redis.eval<
       [string, number, number, number, number],
-      string | PeriodBalanceState
+      string | LedgerBalanceState
     >(
-      SEED_PERIOD_LUA,
-      [this.stateKey(params.periodId)],
+      SEED_BALANCE_LUA,
+      [this.stateKey(params.key)],
       [
-        params.periodId,
+        params.key,
         Math.trunc(params.budget),
         Math.trunc(params.consumed ?? 0),
         Math.trunc(params.version ?? 0),
@@ -359,13 +355,13 @@ export class RedLedger<
     );
 
     return typeof raw === 'string'
-      ? (JSON.parse(raw) as PeriodBalanceState)
+      ? (JSON.parse(raw) as LedgerBalanceState)
       : raw;
   }
 
-  public async getState(periodId: string): Promise<PeriodBalanceState | null> {
+  public async getState(key: string): Promise<LedgerBalanceState | null> {
     const raw = await this.redis.hgetall<Record<string, string | number>>(
-      this.stateKey(periodId),
+      this.stateKey(key),
     );
     if (!raw || Object.keys(raw).length === 0) {
       return null;
@@ -377,7 +373,7 @@ export class RedLedger<
     const version = Number(raw.version ?? 0);
 
     return {
-      periodId: String(raw.periodId ?? periodId),
+      key: String(raw.key ?? key),
       budget,
       consumed,
       reserved,
@@ -394,11 +390,10 @@ export class RedLedger<
       throw new Error(`Invalid credit amount: ${input.amount}`);
     }
 
-    const stateKey = this.stateKey(input.periodId);
+    const stateKey = this.stateKey(input.key);
     const argv: [
       CreditOperation,
       number,
-      string,
       string,
       string,
       string,
@@ -408,8 +403,7 @@ export class RedLedger<
     ] = [
       operation,
       Math.trunc(input.amount),
-      input.eventId ?? randomUUID(),
-      input.periodId,
+      input.key,
       input.requestId,
       input.createdAt ?? new Date().toISOString(),
       this.stateTtlSeconds,
@@ -426,16 +420,16 @@ export class RedLedger<
         ? (JSON.parse(firstRaw) as CreditMutationResult<TMetadata>)
         : firstRaw;
 
-    if (firstAttempt.status !== 'uninitialized' || !this.loadPeriod) {
+    if (firstAttempt.status !== 'uninitialized' || !this.loadBalance) {
       return firstAttempt;
     }
 
-    const period = await this.loadPeriod(input.periodId);
-    if (!period) {
+    const loaded = await this.loadBalance(input.key);
+    if (!loaded) {
       return firstAttempt;
     }
 
-    await this.seedPeriod(period);
+    await this.seedBalance(loaded);
 
     const retryRaw = await this.redis.eval<
       typeof argv,
