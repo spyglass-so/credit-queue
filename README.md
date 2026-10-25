@@ -1,6 +1,6 @@
 # redledger
 
-Atomic Redis Lua credit ledger with two-phase reservations (`reserve`, `settle`, `release`), monotonic billing-period versioning, and an atomic write-behind event queue.
+Atomic Redis Lua credit ledger with two-phase reservations (`reserve`, `settle`, `release`), monotonic period versioning, and an atomic write-behind event queue.
 
 Works with `@upstash/redis` or any Redis client providing `eval`, `hgetall`, and `lpop`.
 
@@ -24,28 +24,28 @@ const redis = new Redis({
 export const creditLedger = new RedLedger({
   redis,
   prefix: 'billing',
-  loadPeriod: async (billingPeriodId) => {
-    const row = await db.getBillingPeriodByPk(billingPeriodId);
+  loadPeriod: async (periodId) => {
+    const row = await db.getBillingPeriodByPk(periodId);
     if (!row) return null;
     return {
-      billingPeriodId: row.id,
-      billingTeamId: row.teamId,
-      budgetMicrodollars: row.allowanceMicrodollars + row.grantedMicrodollars,
-      consumedMicrodollars: row.consumedMicrodollars,
-      checkpointVersion: row.checkpointVersion,
+      periodId: row.id,
+      budget: row.allowanceMicrodollars + row.grantedMicrodollars,
+      consumed: row.consumedMicrodollars,
+      version: row.checkpointVersion,
     };
   },
 });
 
 // 1. Reserve credits before running an operation
 const reserved = await creditLedger.reserve({
+  periodId: 'period_1',
   requestId: 'req_123',
-  billingTeamId: 'team_1',
-  billingPeriodId: 'period_1',
-  workspaceId: 'ws_1',
-  userId: 'user_1',
-  apiKeyId: 'key_1',
   amount: 5_000,
+  metadata: {
+    workspaceId: 'ws_1',
+    userId: 'user_1',
+    apiKeyId: 'key_1',
+  },
 });
 
 if (!reserved.ok) {
@@ -54,13 +54,14 @@ if (!reserved.ok) {
 
 // 2. Settle actual usage (or release on failure)
 await creditLedger.settle({
+  periodId: 'period_1',
   requestId: 'req_123',
-  billingTeamId: 'team_1',
-  billingPeriodId: 'period_1',
-  workspaceId: 'ws_1',
-  userId: 'user_1',
-  apiKeyId: 'key_1',
   amount: 3_200,
+  metadata: {
+    workspaceId: 'ws_1',
+    userId: 'user_1',
+    apiKeyId: 'key_1',
+  },
 });
 
 // 3. Drain events in background worker to checkpoint Postgres
@@ -69,5 +70,5 @@ const events = await creditLedger.dequeue(100);
 
 ## Redis Keys
 
-- `{prefix}:period:{billingPeriodId}:state` (Hash) — Stores `budgetMicrodollars`, `consumedMicrodollars`, `reservedMicrodollars`, `version`, and active holds (`res:{requestId}`).
+- `{prefix}:period:{periodId}:state` (Hash) — Stores `budget`, `consumed`, `reserved`, `version`, and active holds (`res:{requestId}`).
 - `{prefix}:credit-events:queue` (List) — Write-behind queue where every mutation atomically `RPUSH`es a `CreditLedgerEvent`.
