@@ -88,8 +88,7 @@ class FakeRedis {
     const key = String(argv[0]);
     const budget = Number(argv[1] ?? 0);
     const consumed = Number(argv[2] ?? 0);
-    const version = Number(argv[3] ?? 0);
-    const ttlSeconds = Number(argv[4] ?? 3024000);
+    const ttlSeconds = Number(argv[3] ?? 3024000);
 
     if (this.exists(stateKey) === 0) {
       this.hset(
@@ -102,16 +101,10 @@ class FakeRedis {
         consumed,
         'reserved',
         0,
-        'version',
-        version,
       );
       this.ttls.set(stateKey, ttlSeconds);
     } else {
-      const currentVersion = Number(this.hget(stateKey, 'version') ?? 0);
       this.hset(stateKey, 'key', key, 'budget', budget);
-      if (version > currentVersion) {
-        this.hset(stateKey, 'consumed', consumed, 'version', version);
-      }
       if (!this.ttls.has(stateKey)) {
         this.ttls.set(stateKey, ttlSeconds);
       }
@@ -120,7 +113,6 @@ class FakeRedis {
     const finalBudget = Number(this.hget(stateKey, 'budget') ?? 0);
     const finalConsumed = Number(this.hget(stateKey, 'consumed') ?? 0);
     const finalReserved = Number(this.hget(stateKey, 'reserved') ?? 0);
-    const finalVersion = Number(this.hget(stateKey, 'version') ?? 0);
 
     return JSON.stringify({
       key,
@@ -128,7 +120,6 @@ class FakeRedis {
       consumed: finalConsumed,
       reserved: finalReserved,
       available: finalBudget - (finalConsumed + finalReserved),
-      version: finalVersion,
     });
   }
 
@@ -170,7 +161,6 @@ class FakeRedis {
     const budget = Number(this.hget(stateKey, 'budget') ?? 0);
     let consumed = Number(this.hget(stateKey, 'consumed') ?? 0);
     let reserved = Number(this.hget(stateKey, 'reserved') ?? 0);
-    let version = Number(this.hget(stateKey, 'version') ?? 0);
 
     const buildState = () => ({
       key,
@@ -178,12 +168,9 @@ class FakeRedis {
       consumed,
       reserved,
       available: budget - (consumed + reserved),
-      version,
     });
 
     const resField = `res:${requestId}`;
-    let reservedAmount = 0;
-    let eventAmount = amount;
 
     if (operation === 'reserve') {
       if (this.hexists(stateKey, resField) === 1) {
@@ -207,38 +194,20 @@ class FakeRedis {
       }
 
       reserved += amount;
-      reservedAmount = amount;
-      version += 1;
-
-      this.hset(
-        stateKey,
-        'reserved',
-        reserved,
-        'version',
-        version,
-        resField,
-        amount,
-      );
-    } else if (operation === 'settle') {
-      if (this.hexists(stateKey, resField) === 1) {
-        reservedAmount = Number(this.hget(stateKey, resField) ?? 0);
-        reserved = Math.max(0, reserved - reservedAmount);
-        this.hdel(stateKey, resField);
+      this.hset(stateKey, 'reserved', reserved, resField, amount);
+      if (!this.ttls.has(stateKey)) {
+        this.ttls.set(stateKey, stateTtlSeconds);
       }
 
-      consumed += amount;
-      version += 1;
+      return JSON.stringify({
+        ok: true,
+        status: 'applied',
+        state: buildState(),
+        event: null,
+      });
+    }
 
-      this.hset(
-        stateKey,
-        'consumed',
-        consumed,
-        'reserved',
-        reserved,
-        'version',
-        version,
-      );
-    } else if (operation === 'release') {
+    if (operation === 'release') {
       if (this.hexists(stateKey, resField) === 0) {
         return JSON.stringify({
           ok: true,
@@ -248,19 +217,37 @@ class FakeRedis {
         });
       }
 
-      reservedAmount = Number(this.hget(stateKey, resField) ?? 0);
+      const reservedAmount = Number(this.hget(stateKey, resField) ?? 0);
       let releaseAmount = reservedAmount;
       if (amount > 0 && amount < reservedAmount) {
         releaseAmount = amount;
       }
-      eventAmount = releaseAmount;
       reserved = Math.max(0, reserved - releaseAmount);
-      version += 1;
 
       this.hdel(stateKey, resField);
-      this.hset(stateKey, 'reserved', reserved, 'version', version);
+      this.hset(stateKey, 'reserved', reserved);
+      if (!this.ttls.has(stateKey)) {
+        this.ttls.set(stateKey, stateTtlSeconds);
+      }
+
+      return JSON.stringify({
+        ok: true,
+        status: 'applied',
+        state: buildState(),
+        event: null,
+      });
     }
 
+    let reservedAmount = 0;
+    if (this.hexists(stateKey, resField) === 1) {
+      reservedAmount = Number(this.hget(stateKey, resField) ?? 0);
+      reserved = Math.max(0, reserved - reservedAmount);
+      this.hdel(stateKey, resField);
+    }
+
+    consumed += amount;
+
+    this.hset(stateKey, 'consumed', consumed, 'reserved', reserved);
     if (!this.ttls.has(stateKey)) {
       this.ttls.set(stateKey, stateTtlSeconds);
     }
@@ -269,14 +256,12 @@ class FakeRedis {
     const event: CreditQueueEvent = {
       key,
       requestId,
-      operation,
-      amount: eventAmount,
+      amount,
       reservedAmount,
       budget,
       consumed,
       reserved,
       available: nextState.available,
-      version,
       createdAt,
       ...(metadataJson ? { metadata: JSON.parse(metadataJson) } : {}),
     };
@@ -308,12 +293,11 @@ beforeEach(() => {
 });
 
 describe('CreditQueue', () => {
-  it('seeds a balance and reads it back', async () => {
+  it('seeds a balance and reads it back without overwriting live consumed on re-seed', async () => {
     const seeded = await queue.seedBalance({
       key: BUCKET_KEY,
       budget: 5_500_000,
       consumed: 100_000,
-      version: 4,
     });
 
     expect(seeded).toEqual({
@@ -322,46 +306,44 @@ describe('CreditQueue', () => {
       consumed: 100_000,
       reserved: 0,
       available: 5_400_000,
-      version: 4,
+    });
+
+    const reseeded = await queue.seedBalance({
+      key: BUCKET_KEY,
+      budget: 10_000_000,
+      consumed: 0,
+    });
+    expect(reseeded).toEqual({
+      key: BUCKET_KEY,
+      budget: 10_000_000,
+      consumed: 100_000,
+      reserved: 0,
+      available: 9_900_000,
     });
 
     const readBack = await queue.getState(BUCKET_KEY);
-    expect(readBack).toEqual(seeded);
+    expect(readBack).toEqual(reseeded);
   });
 
-  it('reserves, settles, and releases atomically while incrementing version and queuing events', async () => {
+  it('reserves and releases in Redis, and only enqueues events on settle', async () => {
     await queue.seedBalance({
       key: BUCKET_KEY,
       budget: 12_000,
       consumed: 0,
-      version: 0,
     });
 
     const reserve1 = await queue.reserve({
       key: BUCKET_KEY,
       requestId: 'req-1',
       amount: 5_000,
-      metadata: {
-        billingTeamId: 'team-1',
-        workspaceId: 'ws-1',
-        userId: 'user-1',
-        toolName: 'searchBrands',
-      },
     });
 
     expect(reserve1.ok).toBe(true);
-    expect(reserve1.status).toBe('applied');
+    expect(reserve1.event).toBeNull();
     expect(reserve1.state).toMatchObject({
       consumed: 0,
       reserved: 5_000,
       available: 7_000,
-      version: 1,
-    });
-    expect(reserve1.event?.metadata).toEqual({
-      billingTeamId: 'team-1',
-      workspaceId: 'ws-1',
-      userId: 'user-1',
-      toolName: 'searchBrands',
     });
 
     const reserve2 = await queue.reserve({
@@ -371,17 +353,23 @@ describe('CreditQueue', () => {
     });
 
     expect(reserve2.ok).toBe(true);
+    expect(reserve2.event).toBeNull();
     expect(reserve2.state).toMatchObject({
       consumed: 0,
       reserved: 9_000,
       available: 3_000,
-      version: 2,
     });
 
     const settle1 = await queue.settle({
       key: BUCKET_KEY,
       requestId: 'req-1',
       amount: 3_000,
+      metadata: {
+        billingTeamId: 'team-1',
+        workspaceId: 'ws-1',
+        userId: 'user-1',
+        toolName: 'searchBrands',
+      },
     });
 
     expect(settle1.ok).toBe(true);
@@ -389,7 +377,18 @@ describe('CreditQueue', () => {
       consumed: 3_000,
       reserved: 4_000,
       available: 5_000,
-      version: 3,
+    });
+    expect(settle1.event).toMatchObject({
+      key: BUCKET_KEY,
+      requestId: 'req-1',
+      amount: 3_000,
+      reservedAmount: 5_000,
+      metadata: {
+        billingTeamId: 'team-1',
+        workspaceId: 'ws-1',
+        userId: 'user-1',
+        toolName: 'searchBrands',
+      },
     });
 
     const release2 = await queue.release({
@@ -398,30 +397,26 @@ describe('CreditQueue', () => {
     });
 
     expect(release2.ok).toBe(true);
+    expect(release2.event).toBeNull();
     expect(release2.state).toMatchObject({
       consumed: 3_000,
       reserved: 0,
       available: 9_000,
-      version: 4,
     });
 
-    expect(fakeRedis.llen(queue.queueKey)).toBe(4);
+    expect(fakeRedis.llen(queue.queueKey)).toBe(1);
     const events = await queue.dequeue(10);
-    expect(events.map((e) => [e.operation, e.version, e.amount])).toEqual([
-      ['reserve', 1, 5_000],
-      ['reserve', 2, 4_000],
-      ['settle', 3, 3_000],
-      ['release', 4, 4_000],
+    expect(events.map((e) => [e.requestId, e.amount, e.consumed])).toEqual([
+      ['req-1', 3_000, 3_000],
     ]);
     expect(fakeRedis.llen(queue.queueKey)).toBe(0);
   });
 
-  it('denies reserve when available balance is insufficient without changing version or queuing an event', async () => {
+  it('denies reserve when available balance is insufficient without queuing an event', async () => {
     await queue.seedBalance({
       key: BUCKET_KEY,
       budget: 5_000,
       consumed: 4_000,
-      version: 7,
     });
 
     const denied = await queue.reserve({
@@ -437,7 +432,6 @@ describe('CreditQueue', () => {
       available: 1_000,
       consumed: 4_000,
       reserved: 0,
-      version: 7,
     });
     expect(fakeRedis.llen(queue.queueKey)).toBe(0);
   });
@@ -447,7 +441,6 @@ describe('CreditQueue', () => {
       key: BUCKET_KEY,
       budget: 21_000_000,
       consumed: 5_000_000,
-      version: 12,
     });
 
     const result = await queue.settle({
@@ -465,8 +458,50 @@ describe('CreditQueue', () => {
       consumed: 5_050_000,
       reserved: 0,
       available: 15_950_000,
-      version: 13,
     });
     expect(fakeRedis.llen(queue.queueKey)).toBe(1);
+  });
+
+  it('invokes onEnqueue only when settle enqueues an event', async () => {
+    const onEnqueueMock = vi.fn();
+    const hookQueue = new CreditQueue({
+      redis: fakeRedis,
+      onEnqueue: onEnqueueMock,
+    });
+
+    await hookQueue.seedBalance({
+      key: BUCKET_KEY,
+      budget: 10_000,
+    });
+
+    await hookQueue.reserve({
+      key: BUCKET_KEY,
+      requestId: 'req-hook-1',
+      amount: 2_000,
+    });
+    expect(onEnqueueMock).not.toHaveBeenCalled();
+
+    await hookQueue.settle({
+      key: BUCKET_KEY,
+      requestId: 'req-hook-1',
+      amount: 1_500,
+    });
+    expect(onEnqueueMock).toHaveBeenCalledTimes(1);
+    expect(onEnqueueMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: expect.objectContaining({
+          key: BUCKET_KEY,
+          requestId: 'req-hook-1',
+          amount: 1_500,
+          reservedAmount: 2_000,
+        }),
+        state: expect.objectContaining({
+          key: BUCKET_KEY,
+          consumed: 1_500,
+          reserved: 0,
+          available: 8_500,
+        }),
+      }),
+    );
   });
 });

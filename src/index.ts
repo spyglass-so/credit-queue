@@ -5,14 +5,12 @@ export type CreditQueueEvent<
 > = {
   key: string;
   requestId: string;
-  operation: CreditOperation;
   amount: number;
   reservedAmount: number;
   budget: number;
   consumed: number;
   reserved: number;
   available: number;
-  version: number;
   createdAt: string;
   metadata?: TMetadata;
 };
@@ -23,7 +21,6 @@ export type CreditBalanceState = {
   consumed: number;
   reserved: number;
   available: number;
-  version: number;
 };
 
 export type CreditMutationStatus =
@@ -58,7 +55,6 @@ export type SeedBalanceInput = {
   key: string;
   budget: number;
   consumed?: number;
-  version?: number;
   ttlSeconds?: number;
 };
 
@@ -82,6 +78,10 @@ export type CreditQueueConfig<
   queueKey?: string;
   stateTtlSeconds?: number;
   loadBalance?: (key: string) => Promise<SeedBalanceInput | null>;
+  onEnqueue?: (params: {
+    event: CreditQueueEvent<TMetadata>;
+    state: CreditBalanceState;
+  }) => void | Promise<void>;
   __metadataType?: TMetadata;
 };
 
@@ -93,8 +93,7 @@ local stateKey = KEYS[1]
 local key = ARGV[1]
 local budget = tonumber(ARGV[2]) or 0
 local consumed = tonumber(ARGV[3]) or 0
-local version = tonumber(ARGV[4]) or 0
-local ttlSeconds = tonumber(ARGV[5]) or 3024000
+local ttlSeconds = tonumber(ARGV[4]) or 3024000
 
 if redis.call('EXISTS', stateKey) == 0 then
   redis.call(
@@ -103,26 +102,16 @@ if redis.call('EXISTS', stateKey) == 0 then
     'key', key,
     'budget', budget,
     'consumed', consumed,
-    'reserved', 0,
-    'version', version
+    'reserved', 0
   )
   redis.call('EXPIRE', stateKey, ttlSeconds)
 else
-  local currentVersion = tonumber(redis.call('HGET', stateKey, 'version') or '0')
   redis.call(
     'HSET',
     stateKey,
     'key', key,
     'budget', budget
   )
-  if version > currentVersion then
-    redis.call(
-      'HSET',
-      stateKey,
-      'consumed', consumed,
-      'version', version
-    )
-  end
   if redis.call('TTL', stateKey) == -1 then
     redis.call('EXPIRE', stateKey, ttlSeconds)
   end
@@ -131,15 +120,13 @@ end
 local finalBudget = tonumber(redis.call('HGET', stateKey, 'budget') or '0')
 local finalConsumed = tonumber(redis.call('HGET', stateKey, 'consumed') or '0')
 local finalReserved = tonumber(redis.call('HGET', stateKey, 'reserved') or '0')
-local finalVersion = tonumber(redis.call('HGET', stateKey, 'version') or '0')
 
 return cjson.encode({
   key = key,
   budget = finalBudget,
   consumed = finalConsumed,
   reserved = finalReserved,
-  available = finalBudget - (finalConsumed + finalReserved),
-  version = finalVersion
+  available = finalBudget - (finalConsumed + finalReserved)
 })
 `;
 
@@ -178,7 +165,6 @@ end
 local budget = tonumber(redis.call('HGET', stateKey, 'budget') or '0')
 local consumed = tonumber(redis.call('HGET', stateKey, 'consumed') or '0')
 local reserved = tonumber(redis.call('HGET', stateKey, 'reserved') or '0')
-local version = tonumber(redis.call('HGET', stateKey, 'version') or '0')
 
 local function buildState()
   return {
@@ -186,14 +172,11 @@ local function buildState()
     budget = budget,
     consumed = consumed,
     reserved = reserved,
-    available = budget - (consumed + reserved),
-    version = version
+    available = budget - (consumed + reserved)
   }
 end
 
 local resField = 'res:' .. requestId
-local reservedAmount = 0
-local eventAmount = amount
 
 if operation == 'reserve' then
   if redis.call('HEXISTS', stateKey, resField) == 1 then
@@ -217,33 +200,22 @@ if operation == 'reserve' then
   end
 
   reserved = reserved + amount
-  reservedAmount = amount
-  version = version + 1
-
   redis.call(
     'HSET',
     stateKey,
     'reserved', reserved,
-    'version', version,
     resField, amount
   )
-elseif operation == 'settle' then
-  if redis.call('HEXISTS', stateKey, resField) == 1 then
-    reservedAmount = tonumber(redis.call('HGET', stateKey, resField) or '0')
-    reserved = math.max(0, reserved - reservedAmount)
-    redis.call('HDEL', stateKey, resField)
+  if redis.call('TTL', stateKey) == -1 then
+    redis.call('EXPIRE', stateKey, stateTtlSeconds)
   end
 
-  consumed = consumed + amount
-  version = version + 1
-
-  redis.call(
-    'HSET',
-    stateKey,
-    'consumed', consumed,
-    'reserved', reserved,
-    'version', version
-  )
+  return cjson.encode({
+    ok = true,
+    status = 'applied',
+    state = buildState(),
+    event = cjson.null
+  })
 elseif operation == 'release' then
   if redis.call('HEXISTS', stateKey, resField) == 0 then
     return cjson.encode({
@@ -254,22 +226,70 @@ elseif operation == 'release' then
     })
   end
 
-  reservedAmount = tonumber(redis.call('HGET', stateKey, resField) or '0')
+  local reservedAmount = tonumber(redis.call('HGET', stateKey, resField) or '0')
   local releaseAmount = reservedAmount
   if amount > 0 and amount < reservedAmount then
     releaseAmount = amount
   end
-  eventAmount = releaseAmount
   reserved = math.max(0, reserved - releaseAmount)
-  version = version + 1
 
   redis.call('HDEL', stateKey, resField)
+  redis.call('HSET', stateKey, 'reserved', reserved)
+  if redis.call('TTL', stateKey) == -1 then
+    redis.call('EXPIRE', stateKey, stateTtlSeconds)
+  end
+
+  return cjson.encode({
+    ok = true,
+    status = 'applied',
+    state = buildState(),
+    event = cjson.null
+  })
+elseif operation == 'settle' then
+  local reservedAmount = 0
+  if redis.call('HEXISTS', stateKey, resField) == 1 then
+    reservedAmount = tonumber(redis.call('HGET', stateKey, resField) or '0')
+    reserved = math.max(0, reserved - reservedAmount)
+    redis.call('HDEL', stateKey, resField)
+  end
+
+  consumed = consumed + amount
+
   redis.call(
     'HSET',
     stateKey,
-    'reserved', reserved,
-    'version', version
+    'consumed', consumed,
+    'reserved', reserved
   )
+  if redis.call('TTL', stateKey) == -1 then
+    redis.call('EXPIRE', stateKey, stateTtlSeconds)
+  end
+
+  local nextState = buildState()
+  local event = {
+    key = key,
+    requestId = requestId,
+    amount = amount,
+    reservedAmount = reservedAmount,
+    budget = budget,
+    consumed = consumed,
+    reserved = reserved,
+    available = nextState.available,
+    createdAt = createdAt
+  }
+
+  if metadataJson and metadataJson ~= '' then
+    event.metadata = cjson.decode(metadataJson)
+  end
+
+  redis.call('RPUSH', queueKey, cjson.encode(event))
+
+  return cjson.encode({
+    ok = true,
+    status = 'applied',
+    state = nextState,
+    event = event
+  })
 else
   return cjson.encode({
     ok = false,
@@ -279,38 +299,6 @@ else
     event = cjson.null
   })
 end
-
-if redis.call('TTL', stateKey) == -1 then
-  redis.call('EXPIRE', stateKey, stateTtlSeconds)
-end
-
-local nextState = buildState()
-local event = {
-  key = key,
-  requestId = requestId,
-  operation = operation,
-  amount = eventAmount,
-  reservedAmount = reservedAmount,
-  budget = budget,
-  consumed = consumed,
-  reserved = reserved,
-  available = nextState.available,
-  version = version,
-  createdAt = createdAt
-}
-
-if metadataJson and metadataJson ~= '' then
-  event.metadata = cjson.decode(metadataJson)
-end
-
-redis.call('RPUSH', queueKey, cjson.encode(event))
-
-return cjson.encode({
-  ok = true,
-  status = 'applied',
-  state = nextState,
-  event = event
-})
 `;
 
 export class CreditQueue<
@@ -323,6 +311,10 @@ export class CreditQueue<
   private readonly loadBalance?: (
     key: string,
   ) => Promise<SeedBalanceInput | null>;
+  private readonly onEnqueue?: (params: {
+    event: CreditQueueEvent<TMetadata>;
+    state: CreditBalanceState;
+  }) => void | Promise<void>;
 
   constructor(config: CreditQueueConfig<TMetadata>) {
     this.redis = config.redis;
@@ -330,6 +322,7 @@ export class CreditQueue<
     this.queueKey = config.queueKey ?? `${this.prefix}:events:queue`;
     this.stateTtlSeconds = config.stateTtlSeconds ?? DEFAULT_STATE_TTL_SECONDS;
     this.loadBalance = config.loadBalance;
+    this.onEnqueue = config.onEnqueue;
   }
 
   public stateKey(key: string): string {
@@ -340,7 +333,7 @@ export class CreditQueue<
     params: SeedBalanceInput,
   ): Promise<CreditBalanceState> {
     const raw = await this.redis.eval<
-      [string, number, number, number, number],
+      [string, number, number, number],
       string | CreditBalanceState
     >(
       SEED_BALANCE_LUA,
@@ -349,7 +342,6 @@ export class CreditQueue<
         params.key,
         Math.trunc(params.budget),
         Math.trunc(params.consumed ?? 0),
-        Math.trunc(params.version ?? 0),
         params.ttlSeconds ?? this.stateTtlSeconds,
       ],
     );
@@ -370,7 +362,6 @@ export class CreditQueue<
     const budget = Number(raw.budget ?? 0);
     const consumed = Number(raw.consumed ?? 0);
     const reserved = Number(raw.reserved ?? 0);
-    const version = Number(raw.version ?? 0);
 
     return {
       key: String(raw.key ?? key),
@@ -378,7 +369,6 @@ export class CreditQueue<
       consumed,
       reserved,
       available: budget - (consumed + reserved),
-      version,
     };
   }
 
@@ -415,29 +405,40 @@ export class CreditQueue<
       typeof argv,
       string | CreditMutationResult<TMetadata>
     >(MUTATE_CREDITS_AND_ENQUEUE_LUA, [stateKey, this.queueKey], argv);
-    const firstAttempt =
+    let result =
       typeof firstRaw === 'string'
         ? (JSON.parse(firstRaw) as CreditMutationResult<TMetadata>)
         : firstRaw;
 
-    if (firstAttempt.status !== 'uninitialized' || !this.loadBalance) {
-      return firstAttempt;
+    if (result.status === 'uninitialized' && this.loadBalance) {
+      const loaded = await this.loadBalance(input.key);
+      if (loaded) {
+        await this.seedBalance(loaded);
+
+        const retryRaw = await this.redis.eval<
+          typeof argv,
+          string | CreditMutationResult<TMetadata>
+        >(MUTATE_CREDITS_AND_ENQUEUE_LUA, [stateKey, this.queueKey], argv);
+        result =
+          typeof retryRaw === 'string'
+            ? (JSON.parse(retryRaw) as CreditMutationResult<TMetadata>)
+            : retryRaw;
+      }
     }
 
-    const loaded = await this.loadBalance(input.key);
-    if (!loaded) {
-      return firstAttempt;
+    if (
+      result.status === 'applied' &&
+      result.event &&
+      result.state &&
+      this.onEnqueue
+    ) {
+      await this.onEnqueue({
+        event: result.event,
+        state: result.state,
+      });
     }
 
-    await this.seedBalance(loaded);
-
-    const retryRaw = await this.redis.eval<
-      typeof argv,
-      string | CreditMutationResult<TMetadata>
-    >(MUTATE_CREDITS_AND_ENQUEUE_LUA, [stateKey, this.queueKey], argv);
-    return typeof retryRaw === 'string'
-      ? (JSON.parse(retryRaw) as CreditMutationResult<TMetadata>)
-      : retryRaw;
+    return result;
   }
 
   public async reserve(
